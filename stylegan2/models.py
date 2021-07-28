@@ -19,6 +19,24 @@ class PixelNorm(nn.Module):
     def forward(self, input):
         return input * torch.rsqrt(torch.mean(input ** 2, dim=1, keepdim=True) + 1e-8)
 
+# Wrapper that gives name to tensor
+class NamedTensor(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+# Give each style a unique name
+class StridedStyle(nn.ModuleList):
+    def __init__(self, n_latents):
+        super().__init__([NamedTensor() for _ in range(n_latents)])
+        self.n_latents = n_latents
+
+    def forward(self, x):
+        # x already strided
+        styles = [self[i](x[:, i, :]) for i in range(self.n_latents)]
+        return torch.stack(styles, dim=1)
 
 def make_kernel(k):
     k = torch.tensor(k, dtype=torch.float32)
@@ -467,6 +485,7 @@ class Generator(nn.Module):
             in_channel = out_channel
 
         self.n_latent = self.log_size * 2 - 2
+        self.strided_style = StridedStyle(self.n_latent)
 
     def make_noise(self):
         device = self.input.input.device
@@ -540,7 +559,8 @@ class Generator(nn.Module):
             latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
             latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
 
-            latent = torch.cat([latent, latent2], 1)
+            # latent = torch.cat([latent, latent2], 1)
+            latent = self.strided_style(torch.cat([latent, latent2], 1))
 
         features = {}
         out = self.input(latent)
