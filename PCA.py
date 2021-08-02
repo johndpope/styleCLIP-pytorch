@@ -7,10 +7,10 @@ import numpy as np
 import datetime
 import argparse
 from tqdm import trange
+from stylegan2.wrapper import get_instrumented_model # call model
 
 # ganspace folder import
 from ganspace.PCA_estimator import get_estimator  # PCA module
-from stylegan2.wrapper import get_instrumented_model # call model
 
 ### From here, Reference code is https://github.com/harskish/ganspace.git
 # Especially decomposition.py 
@@ -73,7 +73,7 @@ def linreg_lstsq(comp_np, mean_np, stdev_np, inst, config):
         inst.model.partial_forward(z, config.layer)
         act = inst.retained_features()[config.layer].reshape(B, -1)
 
-        # Project onto basis
+        # Project X onto the PC components
         act = act - mean
         coords = project(act, comp)
         coords_scaled = coords / stdev
@@ -132,22 +132,22 @@ def compute(config, device):
     inst.retain_layer(layer_key)
     model.partial_forward(model.sample_latent(1), layer_key)
     sample_shape = inst.retained_features()[layer_key].shape 
-    sample_dims = np.prod(sample_shape) # 
-    print('Feature shape:', sample_shape) # 512
+    sample_dims = np.prod(sample_shape) # 512
+    print('Feature shape:', sample_shape) # 1, 512
 
     input_shape = inst.model.get_latent_shape()
     input_dims = inst.model.get_latent_dims()
 
     # number of components to keep
     config.components = min(config.components, sample_dims)
+    # IPCAEstimator: batch size of max(100, 2*n_components)
     transformer = get_estimator(config.estimator, config.components) # PCA component
 
     X = None
     X_global_mean = None
 
     # Figure out batch size if not provided
-    B = config.batch_size
-
+    B = config.batch_size if config.batch_size is not None else 1
     # Divisible by B (ignored in output name)
     N = config.n // B * B
 
@@ -291,6 +291,8 @@ def compute(config, device):
 
     # Save components File 
     # os.makedirs(dump_name.parent, exist_ok=True)
+    print(f"save npz files")
+    print(f"X_comp {X_comp.shape}")
     np.savez_compressed(dump_name, **{
         'act_comp': X_comp.astype(np.float32),
         'act_mean': X_global_mean.astype(np.float32),
@@ -319,22 +321,22 @@ def compute(config, device):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='GAN component analysis config')
     parser.add_argument('--model', dest='model', type=str, default='StyleGAN2', help='The network to analyze') # StyleGAN, DCGAN, ProGAN, BigGAN-XYZ
-    parser.add_argument('--layer', dest='layer', type=str, default='g_mapping', help='The layer to analyze')
+    parser.add_argument('--layer', dest='layer', type=str, default='g_mapping', help='The layer to analyze') # Analyze all layers if None
     parser.add_argument('--class', dest='output_class', type=str, default='ffhq', help='Output class to generate (BigGAN: Imagenet, ProGAN: LSUN)')
     parser.add_argument('--est', dest='estimator', type=str, default='ipca', help='The algorithm to use [pca, fbpca, cupca, spca, ica]')
     parser.add_argument('--sparsity', type=float, default=1.0, help='Sparsity parameter of SPCA')
     parser.add_argument('--video', dest='make_video', action='store_true', help='Generate output videos (MP4s)')
     parser.add_argument('--batch', dest='batch_mode', action='store_true', help="Don't open windows, instead save results to file")
-    parser.add_argument('-b', dest='batch_size', type=int, default=None, help='Minibatch size, leave empty for automatic detection')
-    parser.add_argument('-c', dest='components', type=int, default=80, help='Number of components to keep')
-    parser.add_argument('-n', type=int, default=300_000, help='Number of examples to use in decomposition')
+    parser.add_argument('-b', dest='batch_size', type=int, default=10_000, help='Minibatch size, leave empty for automatic detection')
+    parser.add_argument('-c', dest='components', type=int, default=50, help='Number of components to keep')
+    parser.add_argument('-n', type=int, default=1_000_000, help='Number of examples to use in decomposition')
     parser.add_argument('--use_w', action='store_true', help='Use W latent space (StyleGAN(2))')
     parser.add_argument('--sigma', type=float, default=2.0, help='Number of stdevs to walk in visualize.py')
     parser.add_argument('--inputs', type=str, default=None, help='Path to directory with named components')
-    parser.add_argument('--seed', type=int, default=None, help='Seed used in decomposition')
+    parser.add_argument('--seed', type=int, default=0, help='Seed used in decomposition')
 
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+    print(f"Torch is Using Device {device}")
     compute(args, device)
