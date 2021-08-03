@@ -8,6 +8,7 @@ from torch.nn import functional as F
 
 from stylegan2.models import Generator
 from utils import *
+from singleChannel import *
 
 def conv_warper(layer, input, style, noise):
     # the conv should change
@@ -121,9 +122,11 @@ if __name__=="__main__":
 
     parser = argparse.ArgumentParser(description='Configuration for styleCLIP')
     parser.add_argument('--neutral', type=str, default='A girl', help='Neutral text without additional information of the image')
-    parser.add_argument('--target', type=str, help='Target text to manipulate the image generated')
-    parser.add_argument('--alpha', type=float, default=5.0, help='Manipulation strength, Between -10 ~ 10')
+    parser.add_argument('--target', type=str, default="A girl is rich", help='Target text to manipulate the image generated')
+    parser.add_argument('--alpha', type=float, default=10.0, help='Manipulation strength, Between -10 ~ 10')
     parser.add_argument('--beta', type=float, default=0.08, help='Manipulation threshold, Between 0.08 ~ 3')
+    parser.add_argument('--use_w', action="store_true", help='Use W plus space to manipulate otherwise manipulate in S space')
+    parser.add_argument('--file_path', type=str, default="./npy/ffhq/", help="Path where W/S statistcs are stored")
     
     args = parser.parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -145,19 +148,63 @@ if __name__=="__main__":
     # Load style space of S from the latent/ Extract noise constant from pretrained model
     style_space, style_names, noise_constants = encoder(generator, latent)
     image = decoder(generator, style_space, latent, noise_constants)
-    tmp = visual(image, orig=True)
+    tmp = visual(image, save=True, name="original")
 
     # StyleCLIP
     model, _ = clip.load("ViT-B/32", device=device)
-    fs3 = np.load('./npy/ffhq/fs3.npy') # 6048, 512
+    
     np.set_printoptions(suppress=True)
+    classnames = [args.target, args.neutral]
+    dt = GetDt(classnames, model) # normalized deviation of t
+    dump_name = args.file_path + "stylegan2-ffhq_style_ipca_c50_n1000000_w.npz"
+    comp = load_components(dump_name) # 1, 50, 512
+    tmp = args.file_path+"W.npy"
+    w_samples = np.load(tmp)
+    w_std = w_stat(w_samples, std=True) # 1, 512
+    
+    if args.use_w:
+        fs3 = np.load('./npy/ffhq/W_manip_50comps.npy') # 900, 512
+        ds, num_c = GetBoundary(fs3, dt, args.beta)
+        ds = ds.reshape([18, 50])
+        indices = np.transpose(np.nonzero(ds))
+        ds_nonzero = ds[np.nonzero(ds)]
+        
+        manipulations = []
+        max_index = indices[0]
+        max = ds_nonzero[0]
+        for index, val in zip(indices[1:], ds_nonzero[1:]):
+            print(index,"\t", val)
+            if max_index[0] == index[0]:
+                if np.abs(max) < np.abs(val):
+                    max = val
+                    max_index = index
+            else:
+                manipulations.append(max_index)
+                max_index = index
+                max =  0
+        manipulations = np.array(manipulations)
+        print(f"Indices: {manipulations.T[0]}") # layer, component
+        print(f"number of layers manipulated: {num_c}")
 
-    classnames=[args.target, args.neutral]
-    dt=GetDt(classnames, model) # normalized deviation of t
-   
-    boundary_tmp2, c, dlatents = GetBoundary(fs3, dt, args.beta, style_space, style_names) # Move each channel by dStyle
-    dlatents_loaded = [s.cpu().detach().numpy() for s in style_space]
-    manipulated_s= MSCode(dlatents_loaded, boundary_tmp2, manipulate_layers=None, num_images=1, alpha=[args.alpha], device=device)
-    image = decoder(generator, manipulated_s, latent, noise_constants)
-    tmp = visual(image, orig=False)
-    print(f"Generated Image {args.target}")
+        layers, components = manipulations.T
+        layer_iter = iter(layers)
+        components_iter = iter(components)
+        for i in range(18):
+            if i in layers:
+                l = next(layer_iter)
+                c = next(components_iter)
+                print(f"layer: {l}, compoenent {c}")
+                latent[:, i, :] += torch.Tensor(ds[l, c]*w_std*args.alpha*comp[c]).squeeze().to(device)
+        style_space, style_names, noise_constants = encoder(generator, latent)
+        image = decoder(generator, style_space, latent, noise_constants)
+        _ = visual(image, save=True, name=args.target)
+
+    else:
+        fs3 = np.load('./npy/ffhq/fs3.npy') # 6048, 512
+        boundary_tmp2, c, dlatents = GetBoundary(fs3, dt, args.beta, style_space, style_names) # Move each channel by dStyle
+        dlatents_loaded = [s.cpu().detach().numpy() for s in style_space]
+        manipulated_s= MSCode(dlatents_loaded, boundary_tmp2, manipulate_layers=None, num_images=1, alpha=[args.alpha], device=device)
+        image = decoder(generator, manipulated_s, latent, noise_constants)
+        tmp = visual(image, orig=False)
+        print(f"Generated Image {args.target}")
+        

@@ -161,6 +161,6 @@ if __name__ == "__main__":
         print(f"Array of features: {all_features.shape}")
         
         all_features = GetFs(all_features)
-        np.save(args.file_path+'W_manip_50comps',all_features)
+        np.save(args.file_path+'W_manip_50comps_100imgs',all_features)
     else:
         sys.quit("Only W space manipulation is supported!")
