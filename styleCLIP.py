@@ -127,60 +127,70 @@ if __name__=="__main__":
     parser.add_argument('--beta', type=float, default=0.08, help='Manipulation threshold, Between 0.08 ~ 3')
     parser.add_argument('--use_w', action="store_true", help='Use W plus space to manipulate otherwise manipulate in S space')
     parser.add_argument('--file_path', type=str, default="./npy/ffhq/", help="Path where W/S statistcs are stored")
+    parser.add_argument('--pca_file', type=str, default="stylegan2-ffhq_style_ipca_c50_n1000000_w.npz", help="File name of pca components")
     
     args = parser.parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Torch device on {device}")
     config = {"latent" : 512, "n_mlp" : 8, "channel_multiplier": 2}
 
+    #* Load StyleGAN2 pretrained generator
     generator = Generator(
             size= 1024,
             style_dim=config["latent"],
             n_mlp=config["n_mlp"],
             channel_multiplier=config["channel_multiplier"]
         )
+
     generator.load_state_dict(torch.load("model/stylegan2-ffhq-config-f.pt")['g_ema'])
     generator.eval()
     generator.to(device)
 
-    # Load W space latent vector of size 1, 18, 512
+    #* Load W space latent vector of size 1, 18, 512
     latent = torch.load("./model/latent.pt")
-    # Load style space of S from the latent/ Extract noise constant from pretrained model
+
+    #* Load style space of S from the latent/ Extract noise constant from pretrained model
     style_space, style_names, noise_constants = encoder(generator, latent)
     image = decoder(generator, style_space, latent, noise_constants)
     tmp = visual(image, save=True, name="original")
 
-    # StyleCLIP
     model, _ = clip.load("ViT-B/32", device=device)
     
     np.set_printoptions(suppress=True)
     classnames = [args.target, args.neutral]
-    dt = GetDt(classnames, model) # normalized deviation of t
-    dump_name = args.file_path + "stylegan2-ffhq_style_ipca_c50_n1000000_w.npz"
-    comp = load_components(dump_name) # 1, 50, 512
-    tmp = args.file_path+"W.npy"
-    w_samples = np.load(tmp)
-    w_std = w_stat(w_samples, std=True) # 1, 512
+
+    dt = GetDt(classnames, model)
+    #* Load PC components 
+    dump_name = args.file_path + args.pca_file
+    n_comp = [int(i.strip("c")) for i in args.pca_file.split("_") if "c" in i]
+    print(f"Number of PC: {n_comp}")
+    comp = load_components(dump_name) # 1, n_comp, 512
+
+    #* Load W plus latents inverted from FFHQ dataset
+    tmp = args.file_path+"W.npy" 
+    w_samples = np.load(tmp) # 100000, 512
+    w_std = w_stat(w_samples, std=True) # 1, 512 -> Used as manipulation strength
     
+    #* Manipulation in W Plus space
     if args.use_w:
-        fs3 = np.load('./npy/ffhq/W_manip_50comps.npy') # 900, 512
+
+        fs3 = np.load('./npy/ffhq/W_manip_50comps.npy') # 18*n_comp, 512
         ds, num_c = GetBoundary(fs3, dt, args.beta)
-        ds = ds.reshape([18, 50])
-        indices = np.transpose(np.nonzero(ds))
-        ds_nonzero = ds[np.nonzero(ds)]
+        ds = ds.reshape([18, n_comp])
+        candidates = np.transpose(np.nonzero(ds)) # Manipulation candidates: [array of layer indices, array of component indices] 
+        ds_nonzero = ds[np.nonzero(ds)] # Text & w channel similarity values of candidates
         
         manipulations = []
-        max_index = indices[0]
-        max = ds_nonzero[0]
-        for index, val in zip(indices[1:], ds_nonzero[1:]):
-            print(index,"\t", val)
-            if max_index[0] == index[0]:
+        max_cand = candidates[0]
+        max_similarity = ds_nonzero[0]
+        for candidate, val in zip(candidates[1:], ds_nonzero[1:]):
+            if max_cand[0] == candidate[0]:
                 if np.abs(max) < np.abs(val):
                     max = val
-                    max_index = index
+                    max_cand = candidate
             else:
-                manipulations.append(max_index)
-                max_index = index
+                manipulations.append(max_cand)
+                max_cand = candidate
                 max =  0
         manipulations = np.array(manipulations)
         print(f"Indices: {manipulations.T[0]}") # layer, component
